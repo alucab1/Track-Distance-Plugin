@@ -13,12 +13,12 @@
 //==============================================================================
 /**
 */
-class NewProjectAudioProcessor  : public juce::AudioProcessor
+class TrackDistanceAudioProcessor  : public juce::AudioProcessor
 {
 public:
     //==============================================================================
-    NewProjectAudioProcessor();
-    ~NewProjectAudioProcessor() override;
+    TrackDistanceAudioProcessor();
+    ~TrackDistanceAudioProcessor() override;
 
     //==============================================================================
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
@@ -53,7 +53,10 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    double distance = 4.0;
+
+    const double defaultDist = 4.0;   //for reference, how far away input audio is considered to be
 private:
     //==============================================================================
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (NewProjectAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackDistanceAudioProcessor)
 };

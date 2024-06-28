@@ -10,7 +10,7 @@
 #include "PluginEditor.h"
 
 //==============================================================================
-NewProjectAudioProcessorEditor::NewProjectAudioProcessorEditor (NewProjectAudioProcessor& p)
+TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDistanceAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p)
 {
     // Make sure that before the constructor has finished, you've set the
@@ -20,17 +20,18 @@ NewProjectAudioProcessorEditor::NewProjectAudioProcessorEditor (NewProjectAudioP
     distanceSlider.setSliderStyle(juce::Slider::SliderStyle::LinearVertical);
     distanceSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 100, 25);
     distanceSlider.setTextValueSuffix("ft");
-    distanceSlider.setRange(0.0, 30.0);
-    distanceSlider.setValue(0.0);
+    distanceSlider.setRange(1.0, 64.0);
+    distanceSlider.setValue(audioProcessor.defaultDist);
+    distanceSlider.addListener(this);
     addAndMakeVisible(distanceSlider);  
 }
 
-NewProjectAudioProcessorEditor::~NewProjectAudioProcessorEditor()
+TrackDistanceAudioProcessorEditor::~TrackDistanceAudioProcessorEditor()
 {
 }
 
 //==============================================================================
-void NewProjectAudioProcessorEditor::paint (juce::Graphics& g)
+void TrackDistanceAudioProcessorEditor::paint (juce::Graphics& g)
 {
     // (Our component is opaque, so we must completely fill the background with a solid colour)
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
@@ -40,9 +41,15 @@ void NewProjectAudioProcessorEditor::paint (juce::Graphics& g)
     //g.drawFittedText ("Hello World!", getLocalBounds(), juce::Justification::centred, 1);
 }
 
-void NewProjectAudioProcessorEditor::resized()
+void TrackDistanceAudioProcessorEditor::resized()
 {
     // This is generally where you'll want to lay out the positions of any
     // subcomponents in your editor..
     distanceSlider.setBounds(getLocalBounds());
+}
+
+void TrackDistanceAudioProcessorEditor::sliderValueChanged(juce::Slider* slider)
+{
+    if (slider == &distanceSlider) //future proofing in case more sliders are added
+        audioProcessor.distance = distanceSlider.getValue();
 }
