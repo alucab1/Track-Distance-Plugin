@@ -17,6 +17,7 @@ TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDista
     // editor's size to whatever you need it to be.
     setSize (230, 400);
 
+    // Distance Slider
     distanceSlider.setSliderStyle(juce::Slider::SliderStyle::LinearVertical);
     distanceSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 100, 25);
     distanceSlider.setTextValueSuffix(" ft");
@@ -25,6 +26,7 @@ TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDista
     distanceSlider.addListener(this);
     addAndMakeVisible(distanceSlider);  
 
+    // Feature Buttons
     reverbButton.setButtonText("Enable Reverb");
     reverbButton.addListener(this);
     addAndMakeVisible(reverbButton);
@@ -71,16 +73,18 @@ void TrackDistanceAudioProcessorEditor::resized()
 
 void TrackDistanceAudioProcessorEditor::sliderValueChanged(juce::Slider* slider)
 {
-    if (slider == &distanceSlider) //future proofing in case more sliders are added
-        audioProcessor.distance = distanceSlider.getValue();
+    if (slider == &distanceSlider) // future proofing in case more sliders are added
+        audioProcessor.distance.store((float)distanceSlider.getValue()); // explicit atomic store from UI thread
 }
 
-void TrackDistanceAudioProcessorEditor::buttonClicked(juce::Button* button)
-{
+void TrackDistanceAudioProcessorEditor::buttonStateChanged(juce::Button* button)
+{}
+
+void TrackDistanceAudioProcessorEditor::buttonClicked(juce::Button* button) {
     if (button == &reverbButton)
-        audioProcessor.reverbEnabled = !(audioProcessor.reverbEnabled);
+        audioProcessor.toggleReverb();
     else if (button == &delayButton)
-        audioProcessor.reverbEnabled = !(audioProcessor.delayEnabled);
+        audioProcessor.toggleDelay();
     else if (button == &freqAttenuationButton)
-        audioProcessor.reverbEnabled = !(audioProcessor.freqAttenuationEnabled);
+        audioProcessor.toggleFreq();
 }

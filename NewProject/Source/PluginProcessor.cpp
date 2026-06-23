@@ -22,6 +22,8 @@ TrackDistanceAudioProcessor::TrackDistanceAudioProcessor()
                        )
 #endif
 {
+    delayedBuffer.setSize(2, 192000, true, false, true);
+    delayedBuffer.applyGain(0);
 }
 
 TrackDistanceAudioProcessor::~TrackDistanceAudioProcessor()
@@ -93,9 +95,22 @@ void TrackDistanceAudioProcessor::changeProgramName (int index, const juce::Stri
 //==============================================================================
 void TrackDistanceAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
+    currentSampleRate = sampleRate;
     reverb.setSampleRate(sampleRate);
+
+    float dist = distance.load();
+
+    // reset() configures the ramp length (50ms here) and sets internal state to
+    // the current sampleRate. setCurrentAndTargetValue() primes the smoother at
+    // the current distance so there's no unwanted ramp-from-zero on the first block.
+    smoothedDelaySamples.reset(sampleRate, 0.05);
+    smoothedGain.reset(sampleRate, 0.05);
+    smoothedDelaySamples.setCurrentAndTargetValue(dist / 1125.0f * (float)sampleRate);
+    smoothedGain.setCurrentAndTargetValue(defaultDist / dist);
+
+    // Allocate once here so processBlock never touches the heap.
+    channelData.resize(getTotalNumInputChannels());
+
     updateReverbParams();
 }
 
@@ -133,11 +148,13 @@ bool TrackDistanceAudioProcessor::isBusesLayoutSupported (const BusesLayout& lay
 
 void TrackDistanceAudioProcessor::updateReverbParams()
 {
+    float dist = distance.load(); // atomic load — safe to call from either thread
+
     //params.roomSize = size;   // can be set by user
     params.damping = 0.92f;
-    params.wetLevel = 0.015f * distance;    // relative to distance
+    params.wetLevel = 0.015f * dist;  // relative to distance
     params.dryLevel = 0.7f;
-    params.width = 0.006f * distance;     //relative to distance
+    params.width = 0.006f * dist;    // relative to distance
 
     reverb.setParameters(params);
 }
@@ -145,43 +162,91 @@ void TrackDistanceAudioProcessor::updateReverbParams()
 void TrackDistanceAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels  = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    int  numSamples            = buffer.getNumSamples();
 
-    int numSamples = buffer.getNumSamples();
+    // Atomically snapshot the distance value the UI thread may have just updated.
+    float dist = distance.load();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear (i, 0, numSamples);
+    // Tell each smoother where it should ramp to over the next ~50ms.
+    // The corrected formula is distance / speedOfSound * sampleRate — NOT * numSamples,
+    // which would make the delay time vary with buffer size.
+    smoothedDelaySamples.setTargetValue(dist / 1125.0f * (float)currentSampleRate);
+    smoothedGain.setTargetValue(defaultDist / dist);
 
-    updateReverbParams();
-
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    std::vector <float*> channelData(2);
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
+    // Recompute reverb parameters only when distance has actually changed,
+    // not unconditionally on every block.
+    if (dist != lastDistance)
     {
-        //float* channelData = buffer.getWritePointer (channel);
-        channelData[channel] = buffer.getWritePointer(channel);
-
-        for (int sample = 0; sample < numSamples; sample++)
-        {
-            channelData[channel][sample] = buffer.getSample(channel, sample) * (defaultDist/distance);  // amplitude inversely proportional to distance
-        }
-        if (totalNumInputChannels == 1 && reverbEnabled)
-            reverb.processMono(channelData[channel], numSamples);
+        updateReverbParams();
+        lastDistance = dist;
     }
-    if (totalNumInputChannels == 2 && reverbEnabled)
-        reverb.processStereo(channelData[0], channelData[1], numSamples);
+
+    // Collect writable pointers for all channels up front.
+    for (int ch = 0; ch < totalNumInputChannels; ++ch)
+        channelData[ch] = buffer.getWritePointer(ch);
+
+    if (delayEnabled)
+    {
+        // Samples are the OUTER loop and channels are the INNER loop so that dp
+        // (the circular buffer write position) advances exactly once per sample.
+        // Previously channels were outer, which made dp advance numChannels*numSamples
+        // per block — a stereo bug that offset channel 1's data in the ring buffer.
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            // getNextValue() steps each smoother by one sample toward its target,
+            // so the delay time and gain change gradually rather than jumping.
+            float currentDelaySamples = smoothedDelaySamples.getNextValue();
+            float currentGain         = smoothedGain.getNextValue();
+
+            // Linear interpolation between the two adjacent delay-buffer samples
+            // that straddle the fractional read position. Without this, the read
+            // pointer would snap to integer positions, causing subtle pitch artifacts
+            // as the delay time slowly changes.
+            int   d0     = (int)currentDelaySamples;
+            float frac   = currentDelaySamples - d0;
+            int   bufLen = delayedBuffer.getNumSamples();
+
+            for (int ch = 0; ch < totalNumInputChannels; ++ch)
+            {
+                // Write the incoming sample into the circular ring buffer.
+                delayedBuffer.setSample(ch, dp, channelData[ch][sample]);
+
+                // Read back from d0 samples ago, wrapping around the ring boundary.
+                int op0 = (dp - d0 + bufLen) % bufLen;
+                int op1 = (op0 - 1 + bufLen) % bufLen; // one sample further back for interpolation
+
+                float x = delayedBuffer.getSample(ch, op0) * (1.0f - frac)
+                        + delayedBuffer.getSample(ch, op1) * frac;
+
+                // Apply smoothed gain (amplitude falls off with distance).
+                channelData[ch][sample] = x * currentGain;
+            }
+
+            // Advance the shared write position once — after all channels are written.
+            if (++dp >= bufLen)
+                dp = 0;
+        }
+    }
+    else
+    {
+        // No delay: just apply the smoothed gain attenuation per sample.
+        for (int sample = 0; sample < numSamples; ++sample)
+        {
+            float currentGain = smoothedGain.getNextValue();
+            for (int ch = 0; ch < totalNumInputChannels; ++ch)
+                channelData[ch][sample] *= currentGain;
+        }
+    }
+
+    // Apply reverb after delay/gain so the wet signal reflects attenuated audio.
+    if (reverbEnabled)
+    {
+        if (totalNumInputChannels == 1)
+            reverb.processMono(channelData[0], numSamples);
+        else
+            reverb.processStereo(channelData[0], channelData[1], numSamples);
+    }
 }
 
 //==============================================================================
