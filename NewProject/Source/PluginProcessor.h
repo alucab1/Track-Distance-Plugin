@@ -87,9 +87,11 @@ private:
     juce::Reverb reverb;
     juce::Reverb::Parameters params;
 
-    bool reverbEnabled = false;
-    bool freqAttenuationEnabled = false; // Look into ISO 9613-2 for more info on frequency response
-    bool delayEnabled = false; // delay based on speed of sound in normal air
+    // Atomic so the compiler cannot cache these in a register and serve stale
+    // values to the audio thread after the UI thread has toggled them.
+    std::atomic<bool> reverbEnabled { false };
+    std::atomic<bool> freqAttenuationEnabled { false }; // Look into ISO 9613-2 for more info on frequency response
+    std::atomic<bool> delayEnabled { false }; // delay based on speed of sound in normal air
 
     void updateReverbParams();
 
