@@ -39,5 +39,16 @@ private:
     juce::TextButton delayButton;
     juce::TextButton zeroButton;
 
+    // Radio group: only one of these two can be toggled at a time.
+    // Both are disabled when the speed-of-sound delay feature is off.
+    juce::TextButton naturalDopplerButton;
+    juce::TextButton customSmoothingButton;
+
+    // Only interactable when customSmoothingButton is selected and delay is on.
+    juce::Slider smoothingSlider;
+
+    // Enables/disables the doppler mode controls based on delay toggle state.
+    void updateDopplerControls();
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrackDistanceAudioProcessorEditor)
 };

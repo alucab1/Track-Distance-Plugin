@@ -270,6 +270,8 @@ void TrackDistanceAudioProcessor::getStateInformation (juce::MemoryBlock& destDa
     xml.setAttribute ("reverbEnabled",           (bool)   reverbEnabled.load());
     xml.setAttribute ("delayEnabled",            (bool)   delayEnabled.load());
     xml.setAttribute ("freqAttenuationEnabled",  (bool)   freqAttenuationEnabled.load());
+    xml.setAttribute ("useCustomSmoothing",      (bool)   useCustomSmoothing.load());
+    xml.setAttribute ("smoothingRampMs",         (double) smoothingRampMs.load());
     copyXmlToBinary (xml, destData);
 }
 
@@ -288,6 +290,8 @@ void TrackDistanceAudioProcessor::setStateInformation (const void* data, int siz
         reverbEnabled.store          (xml->getBoolAttribute ("reverbEnabled",          false));
         delayEnabled.store           (xml->getBoolAttribute ("delayEnabled",           false));
         freqAttenuationEnabled.store (xml->getBoolAttribute ("freqAttenuationEnabled", false));
+        useCustomSmoothing.store     (xml->getBoolAttribute ("useCustomSmoothing",     false));
+        smoothingRampMs.store        ((float) xml->getDoubleAttribute ("smoothingRampMs", 50.0));
 
         updateReverbParams();
     }

@@ -55,14 +55,28 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     void toggleReverb() { reverbEnabled = !reverbEnabled; }
-    void toggleDelay() { delayEnabled = !delayEnabled; }
-    void toggleFreq() { freqAttenuationEnabled = !freqAttenuationEnabled; }
+    void toggleDelay()  { delayEnabled = !delayEnabled; }
+    void toggleFreq()   { freqAttenuationEnabled = !freqAttenuationEnabled; }
+
+    // Read-only access for the editor — the bools stay private so only the
+    // toggle methods can write them, keeping write control on the processor side.
+    bool isDelayEnabled()           const { return delayEnabled.load(); }
+    bool isReverbEnabled()          const { return reverbEnabled.load(); }
+    bool isFreqAttenuationEnabled() const { return freqAttenuationEnabled.load(); }
+
+    // Doppler mode: private with getter + setter because the editor sets it to a
+    // specific value (not a flip), and nothing outside the processor should write it freely.
+    bool isUsingCustomSmoothing() const { return useCustomSmoothing.load(); }
+    void setUseCustomSmoothing(bool customMode) { useCustomSmoothing.store(customMode); }
 
     // std::atomic<float> ensures the UI thread can safely write (via the slider)
     // while the audio thread reads in processBlock, with no data race.
     // A plain double/float shared across threads is undefined behavior in C++.
     std::atomic<float> distance { 4.0f };
     const float defaultDist = 4.0f; // reference distance: plugin is calibrated assuming input starts this far away
+
+    // Public like distance — set directly by the smoothing slider on the UI thread.
+    std::atomic<float> smoothingRampMs { 50.0f };
 
 private:
     juce::AudioBuffer<float> delayedBuffer;
@@ -92,6 +106,7 @@ private:
     std::atomic<bool> reverbEnabled { false };
     std::atomic<bool> freqAttenuationEnabled { false }; // Look into ISO 9613-2 for more info on frequency response
     std::atomic<bool> delayEnabled { false }; // delay based on speed of sound in normal air
+    std::atomic<bool> useCustomSmoothing { false }; // false = natural doppler, true = custom ramp time
 
     void updateReverbParams();
 
