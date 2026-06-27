@@ -263,15 +263,34 @@ juce::AudioProcessorEditor* TrackDistanceAudioProcessor::createEditor()
 //==============================================================================
 void TrackDistanceAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
+    // Serialize all user-facing parameters to XML so the host (Ableton) can save
+    // them with the project and restore them on reload.
+    juce::XmlElement xml ("PluginState");
+    xml.setAttribute ("distance",                (double) distance.load());
+    xml.setAttribute ("reverbEnabled",           (bool)   reverbEnabled.load());
+    xml.setAttribute ("delayEnabled",            (bool)   delayEnabled.load());
+    xml.setAttribute ("freqAttenuationEnabled",  (bool)   freqAttenuationEnabled.load());
+    copyXmlToBinary (xml, destData);
 }
 
 void TrackDistanceAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
+    // Called by the host when loading a saved project. Restore all parameters
+    // and update any derived state (reverb params, lastDistance cache).
+    std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
+
+    if (xml != nullptr && xml->hasTagName ("PluginState"))
+    {
+        float dist = (float) xml->getDoubleAttribute ("distance", defaultDist);
+        distance.store (dist);
+        lastDistance = dist; // keep cache in sync so processBlock doesn't re-fire updateReverbParams needlessly
+
+        reverbEnabled.store          (xml->getBoolAttribute ("reverbEnabled",          false));
+        delayEnabled.store           (xml->getBoolAttribute ("delayEnabled",           false));
+        freqAttenuationEnabled.store (xml->getBoolAttribute ("freqAttenuationEnabled", false));
+
+        updateReverbParams();
+    }
 }
 
 //==============================================================================
