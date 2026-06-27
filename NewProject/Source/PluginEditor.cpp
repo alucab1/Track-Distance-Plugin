@@ -28,15 +28,25 @@ TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDista
     addAndMakeVisible(distanceSlider);  
 
     // Feature Buttons
+    // setClickingTogglesState makes the button stay visually toggled after release,
+    // matching the appearance of the doppler mode buttons.
+    // No setRadioGroupId here — all three can be active simultaneously (checkbox behaviour).
+    // setToggleState restores the correct visual state when the editor is reopened.
     reverbButton.setButtonText("Enable Reverb");
+    reverbButton.setClickingTogglesState(true);
+    reverbButton.setToggleState(audioProcessor.isReverbEnabled(), juce::dontSendNotification);
     reverbButton.addListener(this);
     addAndMakeVisible(reverbButton);
 
     delayButton.setButtonText("Enable Speed of Sound Delay");
+    delayButton.setClickingTogglesState(true);
+    delayButton.setToggleState(audioProcessor.isDelayEnabled(), juce::dontSendNotification);
     delayButton.addListener(this);
     addAndMakeVisible(delayButton);
 
     freqAttenuationButton.setButtonText("Enable Frequency Attenuation");
+    freqAttenuationButton.setClickingTogglesState(true);
+    freqAttenuationButton.setToggleState(audioProcessor.isFreqAttenuationEnabled(), juce::dontSendNotification);
     freqAttenuationButton.addListener(this);
     addAndMakeVisible(freqAttenuationButton);
 
