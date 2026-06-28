@@ -22,6 +22,13 @@ TrackDistanceAudioProcessor::TrackDistanceAudioProcessor()
                        )
 #endif
 {
+    // Register with the host so the parameter appears in Ableton's automation lanes.
+    addParameter(distanceParam = new juce::AudioParameterFloat(
+        "distance", "Distance",
+        juce::NormalisableRange<float>(1.0f, 100.0f, 0.01f),
+        4.0f
+    ));
+
     delayedBuffer.setSize(2, 192000, true, false, true);
     delayedBuffer.applyGain(0);
 }
@@ -98,15 +105,24 @@ void TrackDistanceAudioProcessor::prepareToPlay (double sampleRate, int samplesP
     currentSampleRate = sampleRate;
     reverb.setSampleRate(sampleRate);
 
-    float dist = distance.load();
+    float dist = distanceParam->get();
 
     // reset() configures the ramp length (50ms here) and sets internal state to
     // the current sampleRate. setCurrentAndTargetValue() primes the smoother at
     // the current distance so there's no unwanted ramp-from-zero on the first block.
     smoothedDelaySamples.reset(sampleRate, 0.05);
     smoothedGain.reset(sampleRate, 0.05);
-    smoothedDelaySamples.setCurrentAndTargetValue(dist / 1125.0f * (float)sampleRate);
+    float initialDelay = dist / 1125.0f * (float)sampleRate;
+    smoothedDelaySamples.setCurrentAndTargetValue(initialDelay);
     smoothedGain.setCurrentAndTargetValue(defaultDist / dist);
+
+    // Prime the natural doppler tracker at the same position so neither mode
+    // starts with a ramp-from-zero on the first block.
+    naturalDelaySamples    = initialDelay;
+    naturalTarget.reset(sampleRate, 0.03);  // 30ms pre-smoother to absorb slider ticks
+    naturalTarget.setCurrentAndTargetValue(initialDelay);
+    lastSmoothingRampMs    = smoothingRampMs.load();
+    lastUseCustomSmoothing = useCustomSmoothing.load();
 
     // Allocate once here so processBlock never touches the heap.
     channelData.resize(getTotalNumInputChannels());
@@ -148,7 +164,7 @@ bool TrackDistanceAudioProcessor::isBusesLayoutSupported (const BusesLayout& lay
 
 void TrackDistanceAudioProcessor::updateReverbParams()
 {
-    float dist = distance.load(); // atomic load — safe to call from either thread
+    float dist = distanceParam->get();
 
     //params.roomSize = size;   // can be set by user
     params.damping = 0.92f;
@@ -165,21 +181,61 @@ void TrackDistanceAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     auto totalNumInputChannels = getTotalNumInputChannels();
     int  numSamples            = buffer.getNumSamples();
 
-    // Atomically snapshot the distance value the UI thread may have just updated.
-    float dist = distance.load();
+    float dist            = distanceParam->get();
+    bool  customSmoothing = useCustomSmoothing.load();
+    float targetDelay     = dist / 1125.0f * (float)currentSampleRate;
 
-    // Tell each smoother where it should ramp to over the next ~50ms.
-    // The corrected formula is distance / speedOfSound * sampleRate — NOT * numSamples,
-    // which would make the delay time vary with buffer size.
-    smoothedDelaySamples.setTargetValue(dist / 1125.0f * (float)currentSampleRate);
     smoothedGain.setTargetValue(defaultDist / dist);
 
-    // Recompute reverb parameters only when distance has actually changed,
-    // not unconditionally on every block.
     if (dist != lastDistance)
     {
         updateReverbParams();
         lastDistance = dist;
+    }
+
+    // When the user switches modes, sync the about-to-become-active tracker from
+    // the one that was just active so there's no delay position jump at the switch.
+    if (customSmoothing != lastUseCustomSmoothing)
+    {
+        if (customSmoothing)
+        {
+            // Entering custom mode: snap SmoothedValue to where the natural tracker is.
+            smoothedDelaySamples.setCurrentAndTargetValue(naturalDelaySamples);
+            // Also sync smoothedGain — natural mode derives gain directly from
+            // naturalDelaySamples (never calling getNextValue()), so its internal
+            // ramp position is stale. Without this snap, switching to custom mode
+            // would produce a gain jump on the first block.
+            float naturalDist = juce::jmax(naturalDelaySamples / (float)currentSampleRate * 1125.0f, 0.1f);
+            smoothedGain.setCurrentAndTargetValue(defaultDist / naturalDist);
+        }
+        else
+        {
+            // Entering natural mode: snap both trackers to where SmoothedValue is.
+            naturalDelaySamples = smoothedDelaySamples.getCurrentValue();
+            naturalTarget.setCurrentAndTargetValue(naturalDelaySamples);
+        }
+
+        lastUseCustomSmoothing = customSmoothing;
+    }
+
+    if (customSmoothing)
+    {
+        // Only rebuild the ramp when the slider has actually moved.
+        // Calling reset() every block would snap the current value each time.
+        float rampMs = smoothingRampMs.load();
+        if (rampMs != lastSmoothingRampMs)
+        {
+            float curr = smoothedDelaySamples.getCurrentValue();
+            smoothedDelaySamples.reset(currentSampleRate, rampMs / 1000.0f);
+            // Preserve position across the ramp-time change so there's no jump.
+            smoothedDelaySamples.setCurrentAndTargetValue(curr);
+            lastSmoothingRampMs = rampMs;
+        }
+        smoothedDelaySamples.setTargetValue(targetDelay);
+    }
+    else
+    {
+        naturalTarget.setTargetValue(targetDelay);
     }
 
     // Collect writable pointers for all channels up front.
@@ -188,38 +244,67 @@ void TrackDistanceAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
 
     if (delayEnabled)
     {
-        // Samples are the OUTER loop and channels are the INNER loop so that dp
-        // (the circular buffer write position) advances exactly once per sample.
-        // Previously channels were outer, which made dp advance numChannels*numSamples
-        // per block — a stereo bug that offset channel 1's data in the ring buffer.
+        // Max source velocity: 50 ft/s (~34 mph).
+        // At 100 ft/s the pitch shift was ~1.6 semitones — clearly audible but too
+        // large for music production. 50 ft/s gives ~0.77 semitones: unmistakably
+        // Doppler but not overwhelming. Hermite cubic handles 4.4% shift cleanly.
+        const float maxStepPerSample = 50.0f / 1125.0f;
+
         for (int sample = 0; sample < numSamples; ++sample)
         {
-            // getNextValue() steps each smoother by one sample toward its target,
-            // so the delay time and gain change gradually rather than jumping.
-            float currentDelaySamples = smoothedDelaySamples.getNextValue();
-            float currentGain         = smoothedGain.getNextValue();
+            float currentDelaySamples;
+            float currentGain;
+            if (customSmoothing)
+            {
+                // Custom mode: SmoothedValue ramps to targetDelay over the user-set time.
+                currentDelaySamples = smoothedDelaySamples.getNextValue();
+                // Just use default smoothing of 50ms for gain.
+                currentGain = smoothedGain.getNextValue();
+            }
+            else
+            {
+                // Natural Doppler mode: velocity limiting. naturalTarget pre-smooths
+                // the raw slider value (30ms ramp) so small ticks don't each cause a
+                // full-speed burst. The velocity limit only saturates for large, fast
+                // changes — which is when the Doppler pitch shift is actually wanted.
+                float diff = naturalTarget.getNextValue() - naturalDelaySamples;
+                naturalDelaySamples += juce::jlimit(-maxStepPerSample, maxStepPerSample, diff);
+                currentDelaySamples = naturalDelaySamples;
+                // Derive gain from the same velocity-limited position so amplitude and
+                // pitch shift stay physically coherent (both tied to actual source distance).
+                float currentDist = juce::jmax(naturalDelaySamples / (float)currentSampleRate * 1125.0f, 0.1f);
+                currentGain = defaultDist / currentDist;
+            }
 
-            // Linear interpolation between the two adjacent delay-buffer samples
-            // that straddle the fractional read position. Without this, the read
-            // pointer would snap to integer positions, causing subtle pitch artifacts
-            // as the delay time slowly changes.
+            // Hermite cubic interpolation across the four samples surrounding the
+            // fractional read position. Uses 4 points vs. linear's 2, which lets
+            // it handle pitch shifts up to ~10% without audible aliasing — necessary
+            // for the 100 ft/s velocity limit (~8.9% shift at that speed).
             int   d0     = (int)currentDelaySamples;
-            float frac   = currentDelaySamples - d0;
+            float t      = currentDelaySamples - d0;  // fractional part [0, 1)
             int   bufLen = delayedBuffer.getNumSamples();
 
             for (int ch = 0; ch < totalNumInputChannels; ++ch)
             {
-                // Write the incoming sample into the circular ring buffer.
                 delayedBuffer.setSample(ch, dp, channelData[ch][sample]);
 
-                // Read back from d0 samples ago, wrapping around the ring boundary.
-                int op0 = (dp - d0 + bufLen) % bufLen;
-                int op1 = (op0 - 1 + bufLen) % bufLen; // one sample further back for interpolation
+                // Four read positions: one before the target, two after.
+                int i0 = (dp - d0     + bufLen) % bufLen;  // d0   samples ago
+                int im = (dp - d0 + 1 + bufLen) % bufLen;  // d0-1 samples ago
+                int i1 = (dp - d0 - 1 + bufLen) % bufLen;  // d0+1 samples ago
+                int i2 = (dp - d0 - 2 + bufLen) % bufLen;  // d0+2 samples ago
 
-                float x = delayedBuffer.getSample(ch, op0) * (1.0f - frac)
-                        + delayedBuffer.getSample(ch, op1) * frac;
+                float p0 = delayedBuffer.getSample(ch, im);
+                float p1 = delayedBuffer.getSample(ch, i0);
+                float p2 = delayedBuffer.getSample(ch, i1);
+                float p3 = delayedBuffer.getSample(ch, i2);
 
-                // Apply smoothed gain (amplitude falls off with distance).
+                // Catmull-Rom / Hermite coefficients (evaluates p1..p2 at t).
+                float c1 = 0.5f * (p2 - p0);
+                float c2 = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
+                float c3 = 0.5f * (p3 - p0) + 1.5f * (p1 - p2);
+                float x  = ((c3 * t + c2) * t + c1) * t + p1;
+
                 channelData[ch][sample] = x * currentGain;
             }
 
@@ -266,7 +351,7 @@ void TrackDistanceAudioProcessor::getStateInformation (juce::MemoryBlock& destDa
     // Serialize all user-facing parameters to XML so the host (Ableton) can save
     // them with the project and restore them on reload.
     juce::XmlElement xml ("PluginState");
-    xml.setAttribute ("distance",                (double) distance.load());
+    xml.setAttribute ("distance",                (double) distanceParam->get());
     xml.setAttribute ("reverbEnabled",           (bool)   reverbEnabled.load());
     xml.setAttribute ("delayEnabled",            (bool)   delayEnabled.load());
     xml.setAttribute ("freqAttenuationEnabled",  (bool)   freqAttenuationEnabled.load());
@@ -284,8 +369,8 @@ void TrackDistanceAudioProcessor::setStateInformation (const void* data, int siz
     if (xml != nullptr && xml->hasTagName ("PluginState"))
     {
         float dist = (float) xml->getDoubleAttribute ("distance", defaultDist);
-        distance.store (dist);
-        lastDistance = dist; // keep cache in sync so processBlock doesn't re-fire updateReverbParams needlessly
+        *distanceParam = dist; // set without notifying the host (restoring saved state, not a user gesture)
+        lastDistance   = dist; // keep cache in sync so processBlock doesn't re-fire updateReverbParams needlessly
 
         reverbEnabled.store          (xml->getBoolAttribute ("reverbEnabled",          false));
         delayEnabled.store           (xml->getBoolAttribute ("delayEnabled",           false));

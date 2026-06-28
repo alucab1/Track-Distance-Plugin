@@ -23,7 +23,7 @@ TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDista
     distanceSlider.setTextValueSuffix(" ft");
     distanceSlider.setRange(1.0, 100.0);
     // Read the current processor value so reopening the editor doesn't reset the slider.
-    distanceSlider.setValue(audioProcessor.distance.load(), juce::dontSendNotification);
+    distanceSlider.setValue(audioProcessor.distanceParam->get(), juce::dontSendNotification);
     distanceSlider.addListener(this);
     addAndMakeVisible(distanceSlider);  
 
@@ -80,6 +80,9 @@ TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDista
 
     // Set initial enabled state based on current processor state (handles preset load).
     updateDopplerControls();
+
+    // Poll the parameter at 30 Hz so the slider stays in sync during automation playback.
+    startTimerHz(30);
 }
 
 TrackDistanceAudioProcessorEditor::~TrackDistanceAudioProcessorEditor()
@@ -128,9 +131,36 @@ void TrackDistanceAudioProcessorEditor::resized()
 void TrackDistanceAudioProcessorEditor::sliderValueChanged(juce::Slider* slider)
 {
     if (slider == &distanceSlider)
-        audioProcessor.distance.store((float)distanceSlider.getValue());
+    {
+        // Notify the host of the new value (normalised to [0,1]) so it can record automation.
+        float normalised = audioProcessor.distanceParam->getNormalisableRange()
+                               .convertTo0to1((float)distanceSlider.getValue());
+        audioProcessor.distanceParam->setValueNotifyingHost(normalised);
+    }
     else if (slider == &smoothingSlider)
         audioProcessor.smoothingRampMs.store((float)smoothingSlider.getValue());
+}
+
+void TrackDistanceAudioProcessorEditor::sliderDragStarted(juce::Slider* slider)
+{
+    // Tell the host a user gesture has begun so it can arm automation recording.
+    if (slider == &distanceSlider)
+        audioProcessor.distanceParam->beginChangeGesture();
+}
+
+void TrackDistanceAudioProcessorEditor::sliderDragEnded(juce::Slider* slider)
+{
+    if (slider == &distanceSlider)
+        audioProcessor.distanceParam->endChangeGesture();
+}
+
+void TrackDistanceAudioProcessorEditor::timerCallback()
+{
+    // When automation is playing back the host drives distanceParam directly,
+    // bypassing the slider. Keep the slider in sync, but only when the user
+    // isn't dragging it (to avoid fighting their input).
+    if (!distanceSlider.isMouseButtonDown())
+        distanceSlider.setValue(audioProcessor.distanceParam->get(), juce::dontSendNotification);
 }
 
 void TrackDistanceAudioProcessorEditor::buttonStateChanged(juce::Button* button)

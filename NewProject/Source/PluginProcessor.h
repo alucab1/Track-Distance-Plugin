@@ -69,10 +69,10 @@ public:
     bool isUsingCustomSmoothing() const { return useCustomSmoothing.load(); }
     void setUseCustomSmoothing(bool customMode) { useCustomSmoothing.store(customMode); }
 
-    // std::atomic<float> ensures the UI thread can safely write (via the slider)
-    // while the audio thread reads in processBlock, with no data race.
-    // A plain double/float shared across threads is undefined behavior in C++.
-    std::atomic<float> distance { 4.0f };
+    // Registered with the host via addParameter() so Ableton/other DAWs can
+    // automate it. The host reads/writes the normalised value [0,1] internally;
+    // distanceParam->get() returns the unnormalised ft value for audio math.
+    juce::AudioParameterFloat* distanceParam = nullptr;
     const float defaultDist = 4.0f; // reference distance: plugin is calibrated assuming input starts this far away
 
     // Public like distance — set directly by the smoothing slider on the UI thread.
@@ -90,13 +90,34 @@ private:
     double currentSampleRate = 44100.0;
 
     // SmoothedValue ramps each parameter gradually over 50ms instead of jumping
-    // instantly when the slider moves, which would cause a waveform discontinuity (click).
+    // instantly when the slider moves, which would cause a waveform discontinuity
     juce::SmoothedValue<float> smoothedDelaySamples;
     juce::SmoothedValue<float> smoothedGain;
 
     // Cached so we only call updateReverbParams() when distance actually changes,
     // not unconditionally on every processBlock call.
     float lastDistance = 4.0f;
+
+    // --- Natural Doppler mode state ---
+    // Tracks the current delay position under velocity limiting, independently of
+    // SmoothedValue so the two modes can be switched without a position jump.
+    float naturalDelaySamples = 0.0f;
+
+    // Pre-smooths the raw targetDelay before the velocity limiter sees it.
+    // Without this, every discrete slider tick causes a full-speed velocity burst
+    // (max pitch shift for a few samples then silence), which sounds like a trill.
+    // With it, small ticks are absorbed smoothly; only large sudden changes saturate
+    // the velocity limit and produce the intended Doppler pitch shift.
+    juce::SmoothedValue<float> naturalTarget;
+
+    // --- Custom smoothing mode state ---
+    // Cached so reset() is only called when the slider actually moves, not every block.
+    // Calling reset() every block would continuously snap the ramp to the current value.
+    float lastSmoothingRampMs = 50.0f;
+
+    // Cached to detect mode switches so the inactive tracker can be synced from the
+    // active one, preventing a delay position jump at the moment of switching.
+    bool lastUseCustomSmoothing = false;
 
     juce::Reverb reverb;
     juce::Reverb::Parameters params;
