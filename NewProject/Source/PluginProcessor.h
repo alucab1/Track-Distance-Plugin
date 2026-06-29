@@ -122,10 +122,17 @@ private:
     juce::Reverb reverb;
     juce::Reverb::Parameters params;
 
+    // Frequency attenuation: one biquad low-pass filter per channel.
+    // Cutoff falls exponentially with distance, inspired by the frequency-dependent
+    // absorption curves in ISO 9613-1. At 1-100 ft the physical effect is <0.1 dB,
+    // so the curve is artistically scaled to be audible: 20kHz at 4ft, ~2kHz at 100ft.
+    juce::IIRFilter freqFilter[2];
+    float lastFreqCutoff = 20000.0f;
+
     // Atomic so the compiler cannot cache these in a register and serve stale
     // values to the audio thread after the UI thread has toggled them.
     std::atomic<bool> reverbEnabled { false };
-    std::atomic<bool> freqAttenuationEnabled { false }; // Look into ISO 9613-2 for more info on frequency response
+    std::atomic<bool> freqAttenuationEnabled { false };
     std::atomic<bool> delayEnabled { false }; // delay based on speed of sound in normal air
     std::atomic<bool> useCustomSmoothing { false }; // false = natural doppler, true = custom ramp time
 

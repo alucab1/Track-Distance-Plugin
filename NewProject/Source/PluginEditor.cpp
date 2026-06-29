@@ -21,7 +21,7 @@ TrackDistanceAudioProcessorEditor::TrackDistanceAudioProcessorEditor (TrackDista
     distanceSlider.setSliderStyle(juce::Slider::SliderStyle::LinearVertical);
     distanceSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 100, 25);
     distanceSlider.setTextValueSuffix(" ft");
-    distanceSlider.setRange(1.0, 100.0);
+    distanceSlider.setRange(1.0, 150.0);
     // Read the current processor value so reopening the editor doesn't reset the slider.
     distanceSlider.setValue(audioProcessor.distanceParam->get(), juce::dontSendNotification);
     distanceSlider.addListener(this);

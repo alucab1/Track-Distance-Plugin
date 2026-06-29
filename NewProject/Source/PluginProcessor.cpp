@@ -25,7 +25,7 @@ TrackDistanceAudioProcessor::TrackDistanceAudioProcessor()
     // Register with the host so the parameter appears in Ableton's automation lanes.
     addParameter(distanceParam = new juce::AudioParameterFloat(
         "distance", "Distance",
-        juce::NormalisableRange<float>(1.0f, 100.0f, 0.01f),
+        juce::NormalisableRange<float>(1.0f, 150.0f, 0.01f),
         4.0f
     ));
 
@@ -127,6 +127,10 @@ void TrackDistanceAudioProcessor::prepareToPlay (double sampleRate, int samplesP
     // Allocate once here so processBlock never touches the heap.
     channelData.resize(getTotalNumInputChannels());
 
+    for (auto& f : freqFilter)
+        f.reset();
+    lastFreqCutoff = 20000.0f;
+
     updateReverbParams();
 }
 
@@ -144,7 +148,7 @@ bool TrackDistanceAudioProcessor::isBusesLayoutSupported (const BusesLayout& lay
     return true;
   #else
     // This is the place where you check if the layout is supported.
-    // In this template code we only support mono or stereo.
+    // In this template code we only support mono or stereo.  
     // Some plugin hosts, such as certain GarageBand versions, will only
     // load plugins that support stereo bus layouts.
     if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::mono()
@@ -244,11 +248,10 @@ void TrackDistanceAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
 
     if (delayEnabled)
     {
-        // Max source velocity: 50 ft/s (~34 mph).
-        // At 100 ft/s the pitch shift was ~1.6 semitones — clearly audible but too
-        // large for music production. 50 ft/s gives ~0.77 semitones: unmistakably
-        // Doppler but not overwhelming. Hermite cubic handles 4.4% shift cleanly.
-        const float maxStepPerSample = 50.0f / 1125.0f;
+        // Max source velocity: 150 ft/s (~102 mph).
+        // Gives ~2.1 semitones max pitch shift; Hermite cubic handles this cleanly
+        // (well within its ~10-15% aliasing-free range).
+        const float maxStepPerSample = 100.0f / 1125.0f;
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
@@ -322,6 +325,30 @@ void TrackDistanceAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
             for (int ch = 0; ch < totalNumInputChannels; ++ch)
                 channelData[ch][sample] *= currentGain;
         }
+    }
+
+    // Frequency attenuation: low-pass whose cutoff falls exponentially with distance.
+    // Shape is informed by ISO 9613-1 atmospheric absorption (high frequencies
+    // attenuate faster than low), but the magnitude is scaled up so it's perceptible
+    // at the plugin's 1-100 ft range (physical absorption at these distances is <0.1 dB).
+    if (freqAttenuationEnabled)
+    {
+        // a constant here of -0.010f will be close to the real effect, but subtle.
+        // using a higher value currently for artistic exageration but might make this a 
+        // mutable parameter eventually
+        float fc = 20000.0f * std::exp(-0.015f * (dist - defaultDist));
+        fc = juce::jlimit(200.0f, 20000.0f, fc);
+
+        if (std::abs(fc - lastFreqCutoff) > 1.0f)
+        {
+            auto coeffs = juce::IIRCoefficients::makeLowPass(currentSampleRate, (double)fc);
+            for (int ch = 0; ch < juce::jmin(getTotalNumInputChannels(), 2); ++ch)
+                freqFilter[ch].setCoefficients(coeffs);
+            lastFreqCutoff = fc;
+        }
+
+        for (int ch = 0; ch < juce::jmin(getTotalNumInputChannels(), 2); ++ch)
+            freqFilter[ch].processSamples(channelData[ch], numSamples);
     }
 
     // Apply reverb after delay/gain so the wet signal reflects attenuated audio.
